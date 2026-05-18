@@ -2,23 +2,28 @@ package net.dkly.myflashlight
 
 import android.content.Context
 import android.hardware.camera2.CameraAccessException
-import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,11 +34,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,8 +48,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -51,6 +59,8 @@ import net.dkly.myflashlight.ui.theme.MyFlashlightTheme
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
+    private lateinit var flashlightController: FlashlightController
+    private lateinit var settings: FlashlightSettings
     private lateinit var cameraManager: CameraManager
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -60,11 +70,16 @@ class MainActivity : ComponentActivity() {
     private var statusMessage by mutableStateOf("Looking for a flashlight...")
     private var strengthLevel by mutableIntStateOf(1)
     private var maxStrengthLevel by mutableIntStateOf(1)
+    private var hapticsEnabled by mutableStateOf(true)
+    private var keepScreenAwake by mutableStateOf(false)
+    private var startOnLaunch by mutableStateOf(false)
 
     private val torchCallback = object : CameraManager.TorchCallback() {
         override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
             if (cameraId == torchCameraId) {
                 torchEnabled = enabled
+                settings.torchEnabled = enabled
+                updateScreenAwakeFlag()
                 torchAvailable = true
                 statusMessage = if (enabled) "Flashlight is on" else "Flashlight is off"
             }
@@ -73,6 +88,8 @@ class MainActivity : ComponentActivity() {
         override fun onTorchModeUnavailable(cameraId: String) {
             if (cameraId == torchCameraId) {
                 torchEnabled = false
+                settings.torchEnabled = false
+                updateScreenAwakeFlag()
                 torchAvailable = false
                 statusMessage = "Flashlight is temporarily unavailable"
             }
@@ -81,15 +98,22 @@ class MainActivity : ComponentActivity() {
         override fun onTorchStrengthLevelChanged(cameraId: String, newStrengthLevel: Int) {
             if (cameraId == torchCameraId && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 strengthLevel = newStrengthLevel.coerceIn(1, maxStrengthLevel)
+                settings.strengthLevel = strengthLevel
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        settings = FlashlightSettings(this)
+        flashlightController = FlashlightController(this)
+        cameraManager = flashlightController.cameraManagerInstance
+        loadSettings()
         loadFlashlight()
         cameraManager.registerTorchCallback(torchCallback, mainHandler)
+        if (startOnLaunch && torchAvailable) {
+            updateTorchPower(true)
+        }
 
         enableEdgeToEdge()
         setContent {
@@ -101,8 +125,14 @@ class MainActivity : ComponentActivity() {
                         statusMessage = statusMessage,
                         strengthLevel = strengthLevel,
                         maxStrengthLevel = maxStrengthLevel,
+                        hapticsEnabled = hapticsEnabled,
+                        keepScreenAwake = keepScreenAwake,
+                        startOnLaunch = startOnLaunch,
                         onToggle = ::updateTorchPower,
                         onStrengthChange = ::updateStrength,
+                        onHapticsChange = ::updateHapticsEnabled,
+                        onKeepScreenAwakeChange = ::updateKeepScreenAwake,
+                        onStartOnLaunchChange = ::updateStartOnLaunch,
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
@@ -115,23 +145,22 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         runCatching {
             torchCameraId?.let { cameraManager.setTorchMode(it, false) }
+            settings.torchEnabled = false
             cameraManager.unregisterTorchCallback(torchCallback)
         }
         super.onDestroy()
     }
 
-    private fun loadFlashlight() {
-        val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
-            val characteristics = cameraManager.getCameraCharacteristics(id)
-            val hasFlash = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-            val isBackFacing = characteristics.get(CameraCharacteristics.LENS_FACING) ==
-                CameraCharacteristics.LENS_FACING_BACK
+    private fun loadSettings() {
+        hapticsEnabled = settings.hapticsEnabled
+        keepScreenAwake = settings.keepScreenAwake
+        startOnLaunch = settings.startOnLaunch
+        strengthLevel = settings.strengthLevel
+    }
 
-            hasFlash && isBackFacing
-        } ?: cameraManager.cameraIdList.firstOrNull { id ->
-            cameraManager.getCameraCharacteristics(id)
-                .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-        }
+    private fun loadFlashlight() {
+        val flashlightInfo = flashlightController.loadFlashlight()
+        val cameraId = flashlightInfo.cameraId
 
         torchCameraId = cameraId
         torchAvailable = cameraId != null
@@ -141,15 +170,11 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            maxStrengthLevel = characteristics
-                .get(CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL)
-                ?.coerceAtLeast(1) ?: 1
-            strengthLevel = characteristics
-                .get(CameraCharacteristics.FLASH_INFO_STRENGTH_DEFAULT_LEVEL)
-                ?.coerceIn(1, maxStrengthLevel) ?: 1
-        }
+        maxStrengthLevel = flashlightInfo.maxStrengthLevel
+        strengthLevel = settings.strengthLevel
+            .coerceIn(1, maxStrengthLevel)
+            .takeIf { settings.strengthLevel > 1 }
+            ?: flashlightInfo.defaultStrengthLevel
 
         statusMessage = "Flashlight is ready"
     }
@@ -158,13 +183,11 @@ class MainActivity : ComponentActivity() {
         val cameraId = torchCameraId ?: return
 
         runCameraAction {
-            if (enabled && supportsStrengthControl()) {
-                cameraManager.turnOnTorchWithStrengthLevel(cameraId, strengthLevel)
-            } else {
-                cameraManager.setTorchMode(cameraId, enabled)
-            }
+            flashlightController.setPower(cameraId, enabled, strengthLevel, maxStrengthLevel)
 
             torchEnabled = enabled
+            settings.torchEnabled = enabled
+            updateScreenAwakeFlag()
             statusMessage = if (enabled) "Flashlight is on" else "Flashlight is off"
         }
     }
@@ -172,18 +195,43 @@ class MainActivity : ComponentActivity() {
     private fun updateStrength(level: Int) {
         val nextLevel = level.coerceIn(1, maxStrengthLevel)
         strengthLevel = nextLevel
+        settings.strengthLevel = nextLevel
 
         val cameraId = torchCameraId
         if (torchEnabled && cameraId != null && supportsStrengthControl()) {
             runCameraAction {
-                cameraManager.turnOnTorchWithStrengthLevel(cameraId, nextLevel)
+                flashlightController.setStrength(cameraId, nextLevel, maxStrengthLevel)
                 statusMessage = "Brightness set to $nextLevel of $maxStrengthLevel"
             }
         }
     }
 
     private fun supportsStrengthControl(): Boolean {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && maxStrengthLevel > 1
+        return flashlightController.supportsStrengthControl(maxStrengthLevel)
+    }
+
+    private fun updateHapticsEnabled(enabled: Boolean) {
+        hapticsEnabled = enabled
+        settings.hapticsEnabled = enabled
+    }
+
+    private fun updateKeepScreenAwake(enabled: Boolean) {
+        keepScreenAwake = enabled
+        settings.keepScreenAwake = enabled
+        updateScreenAwakeFlag()
+    }
+
+    private fun updateStartOnLaunch(enabled: Boolean) {
+        startOnLaunch = enabled
+        settings.startOnLaunch = enabled
+    }
+
+    private fun updateScreenAwakeFlag() {
+        if (keepScreenAwake && torchEnabled) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     private fun runCameraAction(action: () -> Unit) {
@@ -210,13 +258,30 @@ private fun FlashlightScreen(
     statusMessage: String,
     strengthLevel: Int,
     maxStrengthLevel: Int,
+    hapticsEnabled: Boolean,
+    keepScreenAwake: Boolean,
+    startOnLaunch: Boolean,
     onToggle: (Boolean) -> Unit,
     onStrengthChange: (Int) -> Unit,
+    onHapticsChange: (Boolean) -> Unit,
+    onKeepScreenAwakeChange: (Boolean) -> Unit,
+    onStartOnLaunchChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val strengthSupported = maxStrengthLevel > 1
     val brightnessPercent = ((strengthLevel.toFloat() / maxStrengthLevel.coerceAtLeast(1)) * 100)
         .roundToInt()
+    val haptic = LocalHapticFeedback.current
+    var settingsVisible by remember { mutableStateOf(false) }
+    val animatedBrightness by animateFloatAsState(
+        targetValue = if (enabled) {
+            if (strengthSupported) brightnessPercent / 100f else 1f
+        } else {
+            0.12f
+        },
+        animationSpec = tween(durationMillis = 420),
+        label = "beamBrightness"
+    )
 
     Box(
         modifier = modifier
@@ -232,7 +297,7 @@ private fun FlashlightScreen(
     ) {
         BeamBackdrop(
             enabled = enabled,
-            brightnessPercent = if (strengthSupported) brightnessPercent else 100,
+            brightnessProgress = animatedBrightness,
             modifier = Modifier.fillMaxSize()
         )
 
@@ -243,30 +308,71 @@ private fun FlashlightScreen(
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
             ) {
-                Text(
-                    text = if (enabled) "Flashlight on" else "Flashlight off",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Text(
-                    text = statusMessage,
-                    modifier = Modifier.padding(top = 6.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.68f),
-                    textAlign = TextAlign.Center
-                )
+                Column {
+                    Text(
+                        text = if (enabled) "Flashlight on" else "Flashlight off",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = statusMessage,
+                        modifier = Modifier
+                            .padding(top = 6.dp)
+                            .width(230.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.68f)
+                    )
+                }
+                Surface(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            if (hapticsEnabled) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            settingsVisible = !settingsVisible
+                        },
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.30f)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "SET",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Black,
+                            color = Color.White
+                        )
+                    }
+                }
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                AnimatedVisibility(visible = settingsVisible) {
+                    SettingsPanel(
+                        hapticsEnabled = hapticsEnabled,
+                        keepScreenAwake = keepScreenAwake,
+                        startOnLaunch = startOnLaunch,
+                        onHapticsChange = onHapticsChange,
+                        onKeepScreenAwakeChange = onKeepScreenAwakeChange,
+                        onStartOnLaunchChange = onStartOnLaunchChange
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(if (settingsVisible) 18.dp else 0.dp))
+
                 if (strengthSupported) {
                     VerticalBrightnessSlider(
                         strengthLevel = strengthLevel,
                         maxStrengthLevel = maxStrengthLevel,
                         available = available,
+                        hapticsEnabled = hapticsEnabled,
                         onStrengthChange = onStrengthChange
                     )
                     Text(
@@ -285,7 +391,12 @@ private fun FlashlightScreen(
                 FlashlightPowerButton(
                     enabled = enabled,
                     available = available,
-                    onClick = { onToggle(!enabled) }
+                    onClick = {
+                        if (hapticsEnabled) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                        onToggle(!enabled)
+                    }
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
@@ -302,14 +413,14 @@ private fun FlashlightScreen(
 @Composable
 private fun BeamBackdrop(
     enabled: Boolean,
-    brightnessPercent: Int,
+    brightnessProgress: Float,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier) {
         val width = size.width
         val height = size.height
         val originY = height * 0.52f
-        val intensity = if (enabled) brightnessPercent.coerceIn(18, 100) / 100f else 0.12f
+        val intensity = brightnessProgress.coerceIn(0.08f, 1f)
 
         drawCircle(
             brush = Brush.radialGradient(
@@ -396,8 +507,10 @@ private fun VerticalBrightnessSlider(
     strengthLevel: Int,
     maxStrengthLevel: Int,
     available: Boolean,
+    hapticsEnabled: Boolean,
     onStrengthChange: (Int) -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     Box(
         modifier = Modifier
             .height(196.dp)
@@ -413,7 +526,12 @@ private fun VerticalBrightnessSlider(
         )
         Slider(
             value = strengthLevel.toFloat(),
-            onValueChange = { onStrengthChange(it.roundToInt()) },
+            onValueChange = {
+                if (hapticsEnabled) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                }
+                onStrengthChange(it.roundToInt())
+            },
             valueRange = 1f..maxStrengthLevel.toFloat(),
             steps = (maxStrengthLevel - 2).coerceAtLeast(0),
             enabled = available,
@@ -430,9 +548,15 @@ private fun FlashlightPowerButton(
     available: Boolean,
     onClick: () -> Unit
 ) {
+    val scale by animateFloatAsState(
+        targetValue = if (enabled) 1.08f else 1f,
+        animationSpec = tween(durationMillis = 180),
+        label = "powerButtonScale"
+    )
     Surface(
         modifier = Modifier
             .size(78.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
             .clip(CircleShape)
             .clickable(enabled = available, onClick = onClick),
         shape = CircleShape,
@@ -511,6 +635,84 @@ private fun UnsupportedBrightnessNotice() {
     }
 }
 
+@Composable
+private fun SettingsPanel(
+    hapticsEnabled: Boolean,
+    keepScreenAwake: Boolean,
+    startOnLaunch: Boolean,
+    onHapticsChange: (Boolean) -> Unit,
+    onKeepScreenAwakeChange: (Boolean) -> Unit,
+    onStartOnLaunchChange: (Boolean) -> Unit
+) {
+    Surface(
+        modifier = Modifier.width(300.dp),
+        shape = RoundedCornerShape(8.dp),
+        color = Color.Black.copy(alpha = 0.36f)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            SettingSwitchRow(
+                title = "Haptic feedback",
+                subtitle = "Vibrate on controls",
+                checked = hapticsEnabled,
+                onCheckedChange = onHapticsChange
+            )
+            SettingSwitchRow(
+                title = "Keep screen awake",
+                subtitle = "Only while flashlight is on",
+                checked = keepScreenAwake,
+                onCheckedChange = onKeepScreenAwakeChange
+            )
+            SettingSwitchRow(
+                title = "Start on launch",
+                subtitle = "Turn on when app opens",
+                checked = startOnLaunch,
+                onCheckedChange = onStartOnLaunchChange
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.62f)
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange
+        )
+    }
+}
+
 @Preview(showBackground = true)
 @Composable
 private fun FlashlightScreenPreview() {
@@ -521,8 +723,14 @@ private fun FlashlightScreenPreview() {
             statusMessage = "Flashlight is on",
             strengthLevel = 3,
             maxStrengthLevel = 5,
+            hapticsEnabled = true,
+            keepScreenAwake = true,
+            startOnLaunch = false,
             onToggle = {},
-            onStrengthChange = {}
+            onStrengthChange = {},
+            onHapticsChange = {},
+            onKeepScreenAwakeChange = {},
+            onStartOnLaunchChange = {}
         )
     }
 }

@@ -25,7 +25,12 @@ Nothing too serious. Just learning, testing, and having fun with Android.
 - Show torch availability status
 - Custom full-screen flashlight UI
 - Light beam and flashlight body drawn with Compose
+- Smooth on/off and beam brightness animation
+- Haptic feedback on controls
 - Brightness slider on supported devices
+- Optional keep-screen-awake mode
+- Optional start-on-launch behavior
+- Android Quick Settings tile for toggling the flashlight
 - Automatically turns the torch off when the app closes
 
 ## Brightness support note
@@ -37,6 +42,8 @@ The app uses:
 - `CameraManager.setTorchMode(...)` for basic on/off control
 - `CameraManager.turnOnTorchWithStrengthLevel(...)` for brightness control on supported Android 13+ devices
 - `CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL` to check whether brightness control is available
+- `TileService` for the Quick Settings shortcut
+- `SharedPreferences` for simple local settings
 
 On Android 12 and below, the app still supports reliable on/off flashlight control, but real torch brightness control is not exposed by the public Android SDK.
 
@@ -101,10 +108,10 @@ This is a learning project, not a production flashlight app.
 Possible future improvements:
 
 - Better app icon
-- Animation for the light beam
-- Haptic feedback on power toggle
-- Lock-screen or quick tile support
 - More device-specific testing
+- Lock-screen widget support
+- Automatic shutoff timer
+- Better accessibility polish
 
 ## License
 
