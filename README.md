@@ -1,161 +1,181 @@
 # My Flashlight
 
-> A hand-crafted Android flashlight — not another WebView wrapper.
-> Real camera torch control, real brightness adjustment, real animations.
+> An Android flashlight that does one thing, well — no ads, no trackers, no thirty‑megabyte WebView wrapper.
+> Five Kotlin files, one camera permission, real hardware brightness control.
 
 [English](README.md) | [中文](README.zh-CN.md)
 
 ---
 
-## What it does
+## The pitch
 
-Turn your phone's camera flash into a flashlight with a single tap. Adjust brightness with a slider. Toggle from your notification shade. Leave it running in the background. It just works.
+Search "flashlight" on the Play Store and you will find a hundred apps that bundle a compass, a mirror, a weather widget, and an analytics SDK to flip a single LED. This one does not.
 
-## Features
+**My Flashlight** is a deliberate minimalist build:
 
-| Feature | Details |
+- A single screen, drawn entirely with Jetpack Compose `Canvas` — no XML, no images, no SVGs.
+- One declared dangerous permission: `CAMERA`. Nothing leaves the device. Nothing phones home.
+- Three entry points to toggle the torch — the app, a Quick Settings tile, and a foreground service — all kept in lock‑step by a single `CameraManager.TorchCallback`.
+- Real brightness control on devices that expose it, with a graceful, explanatory fallback when they do not.
+
+The whole project is small enough to read in an afternoon and modify in an evening.
+
+## Highlights
+
+| | |
 |---|---|
-| **One-tap toggle** | Big power button, instant on/off |
-| **Brightness control** | Vertical slider on Android 13+ devices with multi-level torch hardware |
-| **Quick Settings tile** | Toggle without opening the app |
-| **Animated UI** | Custom light beam, flashlight body, and smooth brightness transitions — all drawn with Compose Canvas |
-| **Background mode** | Foreground service keeps the torch alive when you leave the app |
-| **Start on launch** | Optionally turn on the moment the app opens |
-| **Keep screen awake** | Prevents the display from sleeping while the flashlight is active |
-| **Haptic feedback** | Vibration on every control interaction |
-| **Smart warnings** | Battery-low and device-overheat alerts when the torch is on |
-| **Auto-off** | Torch shuts down when the app is destroyed |
-| **No-flash detection** | Gracefully handles devices without camera flash |
+| **Tap to toggle** | One big round power button, with a soft scale animation and a long‑press haptic |
+| **Hardware brightness** | A rotated vertical slider that drives `turnOnTorchWithStrengthLevel()` on Android 13+ |
+| **Quick Settings tile** | Toggle the torch from anywhere, without launching the app |
+| **Background mode** | An opt‑in `FOREGROUND_SERVICE_TYPE_CAMERA` keeps the LED lit after you swipe away |
+| **Live state sync** | `TorchCallback` reflects external changes (other apps, the tile, the system) back into the UI in real time |
+| **Battery & thermal guards** | Warns when the battery drops to ≤ 15 % unplugged, or when `PowerManager` reports a severe thermal state |
+| **Soft fallback** | Devices without a flash install fine and show a friendly "not available" notice |
+| **Persistent settings** | Six keys in `SharedPreferences` — haptics, screen wake, start on launch, background mode, last brightness, last state |
+| **Edge‑to‑edge dark UI** | A vertical gradient, a hand‑drawn flashlight, and an animated light beam |
 
-## How it works
+## Architecture at a glance
 
 ```
-  User taps power
-        |
-        v
-  FlashlightController
-        |
-        +---> CameraManager.getCameraCharacteristics()
-        |         |
-        |         +---> Find back-facing camera with flash
-        |         +---> Read FLASH_INFO_STRENGTH_MAXIMUM_LEVEL
-        |
-        +---> setTorchMode()                          -- basic on/off
-        +---> turnOnTorchWithStrengthLevel()           -- brightness (API 33+)
-        |
-        v
-  CameraManager.TorchCallback  <-- live torch state updates
-        |
-        v
-  Compose recomposes UI  (beam brightness, button state, status text)
+                              ┌──────────────────────────────┐
+                              │     CameraManager (system)   │
+                              └──────────────┬───────────────┘
+                                             │
+                                  TorchCallback (single source of truth)
+                                             │
+        ┌────────────────────┬───────────────┼───────────────┬────────────────┐
+        ▼                    ▼               ▼               ▼                ▼
+  MainActivity        TileService     ForegroundService   Settings        Compose UI
+  (foreground UI)    (Quick Settings)  (background torch) (persistence)   (recomposes)
+        │                    │               │
+        └────────────────────┴───────────────┘
+                             │
+                  FlashlightController
+                  ├─ loadFlashlight()                  → finds the back camera with a flash
+                  ├─ setPower(id, on, level, max)      → turnOnTorchWithStrengthLevel / setTorchMode
+                  ├─ setStrength(id, level, max)       → live brightness update (API 33+)
+                  └─ supportsStrengthControl(max)      → API 33+ AND max level > 1
 ```
 
-A `TileService` handles Quick Settings. A `ForegroundService` keeps the torch running in the background. `SharedPreferences` persists your settings between sessions.
+Each surface (Activity, Tile, foreground Service) owns its own `FlashlightController` and `FlashlightSettings` instance and never talks directly to the others. They stay coherent because every torch change funnels through `CameraManager`, and every callback comes back through `TorchCallback`. That is the trick: there is no shared state to invalidate.
 
-## Brightness support
+## The brightness question
 
-Real torch brightness control requires:
+True torch brightness on Android is not a software setting — it is a hardware capability that the kernel must expose. The app probes for it on launch:
 
-1. **Android 13 (API 33)** or newer
-2. Camera hardware that reports `FLASH_INFO_STRENGTH_MAXIMUM_LEVEL > 1`
+```kotlin
+val maxStrength = characteristics
+    .get(CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL)
+    ?.coerceAtLeast(1) ?: 1
+```
 
-On older Android versions, the app provides reliable on/off control. The UI adapts — showing a fixed-brightness notice with an explanation when the slider isn't available.
+The slider appears only when **both** conditions hold:
 
-## The UI
+1. The device is running **Android 13 (API 33)** or newer, and
+2. `FLASH_INFO_STRENGTH_MAXIMUM_LEVEL` is greater than `1`.
 
-The interface is a dark gradient background with a custom-drawn flashlight and light beam using Compose `Canvas`. When the torch is on:
+If either is missing, the slider is replaced by a small card titled *Fixed brightness* with a "Why not here?" button that opens an honest explanation. No fake slider that pretends to do something.
 
-- The beam animates to match the current brightness level
-- The power button scales up slightly for tactile feedback
-- Status text updates in real time
+## Safety logic
 
-When the torch is off, the beam fades to a dim glow so you can still see the layout.
+The app watches two system signals while the torch is on:
 
-Safety warnings appear automatically:
+| Signal | Source | Trigger | Message |
+|---|---|---|---|
+| Battery | `ACTION_BATTERY_CHANGED` broadcast | `level ≤ 15` and not plugged in | *"Battery is low. The flashlight may drain it quickly."* |
+| Thermal | `PowerManager.OnThermalStatusChangedListener` (API 29+) | `THERMAL_STATUS_SEVERE` or worse | *"The device is hot. Please turn the flashlight off for a moment."* |
 
-- **Low battery** (under 15%, not charging) — "Battery is low. The flashlight may drain it quickly."
-- **Device overheating** (thermal status severe or worse) — "The device is hot. Turn the flashlight off for a moment."
+The warning bar appears and disappears with an animated visibility transition. Both listeners are attached in `onStart` and detached in `onStop`, so they cost nothing when the app is in the background.
+
+## The UI, drawn from code
+
+There is not a single bitmap in the resources for the main screen. The whole illustration is rendered every frame by `BeamBackdrop`:
+
+- A vertical gradient from slate blue to a slight green tint at the bottom.
+- A radial highlight near the top to suggest light spilling onto a wall.
+- A `Path` shaped like a truncated cone — the beam — filled with a layered vertical gradient whose alpha is multiplied by the current brightness.
+- Two `drawRoundRect` calls for the flashlight head and handle, each with their own gradient and a thin specular highlight strip on the side.
+
+The power button is a `Surface` clipped to a circle, scaling to `1.08x` when on, with the flashlight icon (cap, body, and three radiating "shine" lines) drawn by hand inside a `Canvas`. The brightness slider is an ordinary Material 3 `Slider` rotated `-90°` via `graphicsLayer` — the laziest way to get a vertical slider that still feels native.
 
 ## Tech stack
 
-| Layer | What |
+| Layer | Detail |
 |---|---|
 | Language | Kotlin |
-| UI framework | Jetpack Compose + Material 3 |
-| Camera | Camera2 API (`CameraManager`, `CameraCharacteristics`) |
-| Persistence | SharedPreferences |
-| System integration | `TileService` (Quick Settings), `ForegroundService` (background torch) |
-| Build system | Gradle Kotlin DSL |
+| UI | Jetpack Compose, Material 3, `androidx.activity:compose` |
+| Camera | Camera2 (`CameraManager`, `CameraCharacteristics`, `TorchCallback`) |
+| System integration | `TileService` for Quick Settings, `Service` with `FOREGROUND_SERVICE_TYPE_CAMERA` for background mode |
+| Sensors | `BatteryManager` broadcast, `PowerManager` thermal listener |
+| Persistence | `SharedPreferences` (six keys, no DB) |
+| Build | Gradle Kotlin DSL, AGP, `minSdk` 24, `targetSdk` 36 |
 
-## Project structure
+## Project layout
 
 ```
 net/dkly/myflashlight/
-|
-+-- MainActivity.kt               Main UI screen, state management, camera callbacks
-|   +-- FlashlightScreen()        Root composable — layout, animations, settings panel
-|   +-- BeamBackdrop()            Custom Canvas drawing: light beam, flashlight body
-|   +-- FlashlightPowerButton()   Animated power button with flashlight icon
-|   +-- VerticalBrightnessSlider() Rotated slider for torch strength
-|   +-- SettingsPanel()           Toggle switches for preferences
-|   +-- BrightnessHelpDialog()    Explains why brightness isn't available
-|
-+-- FlashlightController.kt       Camera torch logic — discovery, on/off, brightness
-+-- FlashlightSettings.kt         SharedPreferences wrapper for all settings
-+-- FlashlightTileService.kt      Quick Settings tile provider
-+-- FlashlightForegroundService.kt Background service to keep the torch alive
-+-- ui/theme/                     Material 3 colors, typography, theme
+├── MainActivity.kt                ─ Compose UI, permission flow, lifecycle, sensor wiring
+│   ├─ FlashlightScreen()          · root layout
+│   ├─ BeamBackdrop()              · Canvas illustration (beam + body)
+│   ├─ FlashlightPowerButton()     · animated power button
+│   ├─ VerticalBrightnessSlider()  · rotated Material 3 slider
+│   ├─ SettingsPanel()             · the four toggles
+│   └─ BrightnessHelpDialog()      · "why no slider?"
+│
+├── FlashlightController.kt        ─ camera discovery + torch on/off + strength
+├── FlashlightSettings.kt          ─ SharedPreferences wrapper (six keys)
+├── FlashlightTileService.kt       ─ Quick Settings tile (toggle without opening app)
+├── FlashlightForegroundService.kt ─ background torch (FOREGROUND_SERVICE_TYPE_CAMERA)
+└── ui/theme/                      ─ Material 3 colors, typography, theme
 ```
 
 ## Requirements
 
 | | |
 |---|---|
-| Min SDK | **24** (Android 7.0 Nougat) |
-| Target SDK | **36** |
+| Min SDK | 24 (Android 7.0 Nougat) |
+| Target SDK | 36 |
 | JDK | 11+ |
-| Device | Physical Android phone with camera flash |
+| Recommended | A physical Android device with a camera flash. Emulators rarely simulate one. |
 
 ## Build & run
 
 ```powershell
-# Build the debug APK
+# Debug APK
 .\gradlew.bat assembleDebug
 
-# If JAVA_HOME isn't set:
+# If JAVA_HOME isn't set, point it at the JBR bundled with Android Studio:
 $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 .\gradlew.bat assembleDebug
 ```
 
-The APK lands in `app/build/outputs/apk/debug/`.
+The APK lands in `app/build/outputs/apk/debug/app-debug.apk`. Or open the project in Android Studio, attach a device, and press Run.
 
-To run directly: open in Android Studio, connect a device, select the `app` config, and hit Run. Emulators usually lack a real flash — use a physical device.
+## Permissions, in plain English
 
-## Permissions
-
-| Permission | Why |
+| Permission | What it actually does here |
 |---|---|
-| `CAMERA` | Access the camera torch hardware |
-| `POST_NOTIFICATIONS` | Show foreground service notification (Android 13+) |
-| `FOREGROUND_SERVICE` | Keep the torch running in the background |
-| `FOREGROUND_SERVICE_CAMERA` | Declare the foreground service type |
+| `CAMERA` | Required by `CameraManager.setTorchMode()` — the torch is part of the camera subsystem. |
+| `POST_NOTIFICATIONS` | Android 13+ requires it before the background notification can show. Only requested when you enable background mode. |
+| `FOREGROUND_SERVICE` | Lets the app start a long‑running service when background mode is on. |
+| `FOREGROUND_SERVICE_CAMERA` | Declares that the service uses the camera — required by the manifest's `foregroundServiceType="camera"`. |
 
-The `camera.flash` feature is declared as `required="false"` — the app installs fine on flash-less devices and shows a friendly "not available" message.
+`android.hardware.camera.flash` is declared as `required="false"`, so the app installs cleanly on flash‑less devices.
 
-## What could be next
+## Roadmap
 
-- Custom app icon (the current one is the Android default)
-- Lock-screen widget
-- Auto-shutoff timer
-- SOS / strobe mode
-- More device-specific testing
-- Accessibility improvements
+- A real app icon (the current one is the Android default — please send a design)
+- Lock‑screen widget
+- Auto‑shutoff timer
+- SOS and strobe modes
+- Wider device testing, especially on Android 14/15 OEM skins
+- Accessibility pass (TalkBack labels, contrast)
+
+Small, focused pull requests welcome.
 
 ## License
 
-MIT License
-
-Copyright (c) 2026 [dkly](https://www.dkly.net)
+MIT — Copyright © 2026 [dkly](https://www.dkly.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
