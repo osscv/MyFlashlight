@@ -172,6 +172,7 @@ class MainActivity : ComponentActivity() {
         }
         loadSettings()
         loadFlashlight()
+        syncBackgroundModePermissionState()
         cameraManager.registerTorchCallback(torchCallback, mainHandler)
         updateBatteryState(registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)))
         refreshSafetyWarnings()
@@ -413,6 +414,17 @@ class MainActivity : ComponentActivity() {
         }
         if (missing.isNotEmpty()) {
             requestBackgroundPermissions.launch(permissions.toTypedArray())
+        }
+    }
+
+    private fun syncBackgroundModePermissionState() {
+        if (!backgroundFlashlightEnabled) return
+        val missing = requiredBackgroundPermissions().any {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing) {
+            backgroundFlashlightEnabled = false
+            settings.backgroundFlashlightEnabled = false
         }
     }
 
