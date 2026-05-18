@@ -375,12 +375,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startForegroundFlashlightService(cameraId: String) {
-        val intent = Intent(this, FlashlightForegroundService::class.java).apply {
-            putExtra(FlashlightForegroundService.EXTRA_ENABLED, true)
-            putExtra(FlashlightForegroundService.EXTRA_STRENGTH_LEVEL, strengthLevel)
-            putExtra(FlashlightForegroundService.EXTRA_CAMERA_ID, cameraId)
+        runCatching {
+            val intent = Intent(this, FlashlightForegroundService::class.java).apply {
+                putExtra(FlashlightForegroundService.EXTRA_ENABLED, true)
+                putExtra(FlashlightForegroundService.EXTRA_STRENGTH_LEVEL, strengthLevel)
+                putExtra(FlashlightForegroundService.EXTRA_CAMERA_ID, cameraId)
+            }
+            ContextCompat.startForegroundService(this, intent)
+        }.onFailure {
+            backgroundFlashlightEnabled = false
+            settings.backgroundFlashlightEnabled = false
+            statusMessage = "Could not start background flashlight mode"
         }
-        ContextCompat.startForegroundService(this, intent)
     }
 
     private fun requiredBackgroundPermissions(): List<String> {
