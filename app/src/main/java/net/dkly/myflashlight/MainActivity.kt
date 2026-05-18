@@ -165,6 +165,11 @@ class MainActivity : ComponentActivity() {
         flashlightController = FlashlightController(this)
         cameraManager = flashlightController.cameraManagerInstance
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            powerManager.currentThermalStatus
+        } else {
+            PowerManager.THERMAL_STATUS_NONE
+        }
         loadSettings()
         loadFlashlight()
         cameraManager.registerTorchCallback(torchCallback, mainHandler)
@@ -225,8 +230,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         runCatching {
-            torchCameraId?.let { cameraManager.setTorchMode(it, false) }
-            settings.torchEnabled = false
+            if (backgroundFlashlightEnabled && torchEnabled) {
+                maybeStartBackgroundFlashlight()
+            } else {
+                torchCameraId?.let { cameraManager.setTorchMode(it, false) }
+                settings.torchEnabled = false
+                stopBackgroundFlashlightService()
+            }
             cameraManager.unregisterTorchCallback(torchCallback)
         }
         super.onDestroy()
