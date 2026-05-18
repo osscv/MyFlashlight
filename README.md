@@ -26,12 +26,16 @@ The whole project is small enough to read in an afternoon and modify in an eveni
 |---|---|
 | **Tap to toggle** | One big round power button, with a soft scale animation and a long‑press haptic |
 | **Hardware brightness** | A rotated vertical slider that drives `turnOnTorchWithStrengthLevel()` on Android 13+ |
+| **Strobe & SOS modes** | A pattern runner that toggles `setTorchMode` on a timed schedule — fast strobe, or `...---...` morse |
+| **Auto‑shutoff timer** | Cycle through Off / 1 / 5 / 15 / 30 / 60 min; both the activity and the foreground service honour it |
+| **Home & lock‑screen widget** | An `AppWidgetProvider` declared with `home_screen\|keyguard` — tap to toggle, state stays in sync with everything else |
 | **Quick Settings tile** | Toggle the torch from anywhere, without launching the app |
 | **Background mode** | An opt‑in `FOREGROUND_SERVICE_TYPE_CAMERA` keeps the LED lit after you swipe away |
-| **Live state sync** | `TorchCallback` reflects external changes (other apps, the tile, the system) back into the UI in real time |
+| **Live state sync** | `TorchCallback` reflects external changes (other apps, the tile, the widget, the system) back into the UI in real time |
 | **Battery & thermal guards** | Warns when the battery drops to ≤ 15 % unplugged, or when `PowerManager` reports a severe thermal state |
+| **Accessible** | TalkBack labels on every control, `Role.Button` semantics, raised text contrast, selection state announced on mode chips |
 | **Soft fallback** | Devices without a flash install fine and show a friendly "not available" notice |
-| **Persistent settings** | Six keys in `SharedPreferences` — haptics, screen wake, start on launch, background mode, last brightness, last state |
+| **Persistent settings** | Eight keys in `SharedPreferences` — haptics, screen wake, start on launch, background mode, last brightness, last state, mode, shutoff timer |
 | **Edge‑to‑edge dark UI** | A vertical gradient, a hand‑drawn flashlight, and an animated light beam |
 
 ## Architecture at a glance
@@ -165,11 +169,8 @@ The APK lands in `app/build/outputs/apk/debug/app-debug.apk`. Or open the projec
 ## Roadmap
 
 - A real app icon (the current one is the Android default — please send a design)
-- Lock‑screen widget
-- Auto‑shutoff timer
-- SOS and strobe modes
 - Wider device testing, especially on Android 14/15 OEM skins
-- Accessibility pass (TalkBack labels, contrast)
+- More accessibility polish (TalkBack hint phrasing, larger touch targets)
 
 Small, focused pull requests welcome.
 

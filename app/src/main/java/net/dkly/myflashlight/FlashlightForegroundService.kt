@@ -7,13 +7,20 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
 class FlashlightForegroundService : Service() {
     private lateinit var flashlightController: FlashlightController
     private lateinit var settings: FlashlightSettings
+    private val handler = Handler(Looper.getMainLooper())
+    private val shutoffRunnable = Runnable {
+        stopFlashlight()
+        stopSelf()
+    }
     private var cameraId: String? = null
     private var maxStrengthLevel: Int = 1
 
@@ -43,19 +50,37 @@ class FlashlightForegroundService : Service() {
         }
 
         val enabled = intent?.getBooleanExtra(EXTRA_ENABLED, true) ?: true
-        val strength = intent?.getIntExtra(EXTRA_STRENGTH_LEVEL, settings.strengthLevel) ?: settings.strengthLevel
-        val notification = buildNotification(enabled, strength)
+        val strength = intent?.getIntExtra(EXTRA_STRENGTH_LEVEL, settings.strengthLevel)
+            ?: settings.strengthLevel
+        val mode = FlashlightMode.fromName(intent?.getStringExtra(EXTRA_MODE))
+        val shutoffMinutes = intent?.getIntExtra(EXTRA_AUTO_SHUTOFF_MINUTES, settings.autoShutoffMinutes)
+            ?: settings.autoShutoffMinutes
 
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+        val notification = buildNotification(enabled, strength, mode, shutoffMinutes)
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        )
+
+        handler.removeCallbacks(shutoffRunnable)
 
         if (enabled) {
             flashlightController.setPower(
                 cameraId!!,
                 true,
+                mode,
                 strength,
                 maxStrengthLevel
             )
             settings.torchEnabled = true
+            settings.mode = mode
+            FlashlightWidgetProvider.refresh(this)
+
+            if (shutoffMinutes > 0) {
+                handler.postDelayed(shutoffRunnable, shutoffMinutes * 60_000L)
+            }
         } else {
             stopFlashlight()
             stopSelf()
@@ -65,7 +90,9 @@ class FlashlightForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(shutoffRunnable)
         stopFlashlight()
+        flashlightController.dispose()
         super.onDestroy()
     }
 
@@ -75,22 +102,29 @@ class FlashlightForegroundService : Service() {
         val id = cameraId
         if (id != null) {
             runCatching {
-                flashlightController.setPower(id, false, settings.strengthLevel, maxStrengthLevel)
+                flashlightController.setPower(
+                    id,
+                    false,
+                    FlashlightMode.STEADY,
+                    settings.strengthLevel,
+                    maxStrengthLevel
+                )
             }
         }
         settings.torchEnabled = false
+        settings.mode = FlashlightMode.STEADY
+        FlashlightWidgetProvider.refresh(this)
     }
 
-    private fun buildNotification(enabled: Boolean, strengthLevel: Int) = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification(
+        enabled: Boolean,
+        strengthLevel: Int,
+        mode: FlashlightMode,
+        shutoffMinutes: Int
+    ) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_flashlight_tile)
         .setContentTitle("My Flashlight")
-        .setContentText(
-            if (enabled) {
-                "Flashlight running in background at level $strengthLevel"
-            } else {
-                "Flashlight background mode"
-            }
-        )
+        .setContentText(notificationText(enabled, strengthLevel, mode, shutoffMinutes))
         .setOngoing(true)
         .setSilent(true)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -103,6 +137,25 @@ class FlashlightForegroundService : Service() {
             )
         )
         .build()
+
+    private fun notificationText(
+        enabled: Boolean,
+        strengthLevel: Int,
+        mode: FlashlightMode,
+        shutoffMinutes: Int
+    ): String {
+        if (!enabled) return "Flashlight background mode"
+        val modeLabel = when (mode) {
+            FlashlightMode.STEADY -> "Steady at level $strengthLevel"
+            FlashlightMode.STROBE -> "Strobe mode"
+            FlashlightMode.SOS -> "SOS pattern"
+        }
+        return if (shutoffMinutes > 0) {
+            "$modeLabel — auto-off in $shutoffMinutes min"
+        } else {
+            modeLabel
+        }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -122,6 +175,8 @@ class FlashlightForegroundService : Service() {
         const val EXTRA_ENABLED = "extra_enabled"
         const val EXTRA_STRENGTH_LEVEL = "extra_strength_level"
         const val EXTRA_CAMERA_ID = "extra_camera_id"
+        const val EXTRA_MODE = "extra_mode"
+        const val EXTRA_AUTO_SHUTOFF_MINUTES = "extra_auto_shutoff_minutes"
         private const val CHANNEL_ID = "flashlight_background"
         private const val NOTIFICATION_ID = 2001
     }

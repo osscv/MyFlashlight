@@ -9,6 +9,14 @@ class FlashlightController(context: Context) {
     private val cameraManager = context.applicationContext
         .getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
+    private val patternRunner = FlashlightPatternRunner { enabled ->
+        val id = currentCameraId ?: return@FlashlightPatternRunner
+        runCatching { cameraManager.setTorchMode(id, enabled) }
+    }
+
+    private var currentCameraId: String? = null
+    private var currentMode: FlashlightMode = FlashlightMode.STEADY
+
     val cameraManagerInstance: CameraManager
         get() = cameraManager
 
@@ -52,24 +60,51 @@ class FlashlightController(context: Context) {
         )
     }
 
-    fun setPower(cameraId: String, enabled: Boolean, strengthLevel: Int, maxStrengthLevel: Int) {
-        if (enabled && supportsStrengthControl(maxStrengthLevel)) {
-            cameraManager.turnOnTorchWithStrengthLevel(
-                cameraId,
-                strengthLevel.coerceIn(1, maxStrengthLevel)
-            )
-        } else {
-            cameraManager.setTorchMode(cameraId, enabled)
+    fun setPower(
+        cameraId: String,
+        enabled: Boolean,
+        mode: FlashlightMode,
+        strengthLevel: Int,
+        maxStrengthLevel: Int
+    ) {
+        patternRunner.stop()
+        currentCameraId = cameraId
+        currentMode = if (enabled) mode else FlashlightMode.STEADY
+
+        if (!enabled) {
+            cameraManager.setTorchMode(cameraId, false)
+            return
+        }
+
+        when (mode) {
+            FlashlightMode.STEADY -> {
+                if (supportsStrengthControl(maxStrengthLevel)) {
+                    cameraManager.turnOnTorchWithStrengthLevel(
+                        cameraId,
+                        strengthLevel.coerceIn(1, maxStrengthLevel)
+                    )
+                } else {
+                    cameraManager.setTorchMode(cameraId, true)
+                }
+            }
+            FlashlightMode.STROBE, FlashlightMode.SOS -> {
+                patternRunner.start(mode)
+            }
         }
     }
 
     fun setStrength(cameraId: String, strengthLevel: Int, maxStrengthLevel: Int) {
+        if (currentMode != FlashlightMode.STEADY) return
         if (supportsStrengthControl(maxStrengthLevel)) {
             cameraManager.turnOnTorchWithStrengthLevel(
                 cameraId,
                 strengthLevel.coerceIn(1, maxStrengthLevel)
             )
         }
+    }
+
+    fun dispose() {
+        patternRunner.stop()
     }
 
     fun supportsStrengthControl(maxStrengthLevel: Int): Boolean {

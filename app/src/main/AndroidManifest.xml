@@ -47,6 +47,19 @@
             android:name=".FlashlightForegroundService"
             android:exported="false"
             android:foregroundServiceType="camera" />
+
+        <receiver
+            android:name=".FlashlightWidgetProvider"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="net.dkly.myflashlight.widget.TOGGLE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_flashlight_info" />
+        </receiver>
     </application>
 
 </manifest>

@@ -32,15 +32,28 @@ class FlashlightTileService : TileService() {
         val strength = settings.strengthLevel.coerceIn(1, maxStrength)
 
         val changed = runCatching {
-            flashlightController.setPower(cameraId, nextEnabled, strength, maxStrength)
+            flashlightController.setPower(
+                cameraId = cameraId,
+                enabled = nextEnabled,
+                mode = FlashlightMode.STEADY,
+                strengthLevel = strength,
+                maxStrengthLevel = maxStrength
+            )
         }.isSuccess
 
         if (changed) {
             settings.torchEnabled = nextEnabled
+            if (nextEnabled) settings.mode = FlashlightMode.STEADY
             updateTile(nextEnabled)
+            FlashlightWidgetProvider.refresh(this)
         } else {
             updateTile(enabled = false, unavailable = true)
         }
+    }
+
+    override fun onDestroy() {
+        flashlightController.dispose()
+        super.onDestroy()
     }
 
     private fun updateTile(enabled: Boolean, unavailable: Boolean = false) {
