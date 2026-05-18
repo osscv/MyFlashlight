@@ -20,6 +20,10 @@ class FlashlightSettings(context: Context) {
         get() = preferences.getBoolean(KEY_START_ON_LAUNCH, false)
         set(value) = preferences.edit().putBoolean(KEY_START_ON_LAUNCH, value).apply()
 
+    var backgroundFlashlightEnabled: Boolean
+        get() = preferences.getBoolean(KEY_BACKGROUND_FLASHLIGHT_ENABLED, false)
+        set(value) = preferences.edit().putBoolean(KEY_BACKGROUND_FLASHLIGHT_ENABLED, value).apply()
+
     var torchEnabled: Boolean
         get() = preferences.getBoolean(KEY_TORCH_ENABLED, false)
         set(value) = preferences.edit().putBoolean(KEY_TORCH_ENABLED, value).apply()
@@ -32,6 +36,7 @@ class FlashlightSettings(context: Context) {
         const val KEY_HAPTICS_ENABLED = "haptics_enabled"
         const val KEY_KEEP_SCREEN_AWAKE = "keep_screen_awake"
         const val KEY_START_ON_LAUNCH = "start_on_launch"
+        const val KEY_BACKGROUND_FLASHLIGHT_ENABLED = "background_flashlight_enabled"
         const val KEY_TORCH_ENABLED = "torch_enabled"
         const val KEY_STRENGTH_LEVEL = "strength_level"
     }

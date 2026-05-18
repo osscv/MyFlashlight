@@ -1,14 +1,22 @@
 package net.dkly.myflashlight
 
+import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraManager
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
+import android.os.PowerManager
 import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
@@ -31,10 +39,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -55,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import net.dkly.myflashlight.ui.theme.MyFlashlightTheme
 import kotlin.math.roundToInt
 
@@ -62,17 +73,62 @@ class MainActivity : ComponentActivity() {
     private lateinit var flashlightController: FlashlightController
     private lateinit var settings: FlashlightSettings
     private lateinit var cameraManager: CameraManager
+    private lateinit var powerManager: PowerManager
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val pendingBackgroundPermission = mutableStateOf(false)
 
     private var torchCameraId: String? by mutableStateOf(null)
     private var torchEnabled by mutableStateOf(false)
     private var torchAvailable by mutableStateOf(false)
     private var statusMessage by mutableStateOf("Looking for a flashlight...")
+    private var warningMessage by mutableStateOf<String?>(null)
     private var strengthLevel by mutableIntStateOf(1)
     private var maxStrengthLevel by mutableIntStateOf(1)
     private var hapticsEnabled by mutableStateOf(true)
     private var keepScreenAwake by mutableStateOf(false)
     private var startOnLaunch by mutableStateOf(false)
+    private var backgroundFlashlightEnabled by mutableStateOf(false)
+    private var batteryLevel by mutableIntStateOf(100)
+    private var isCharging by mutableStateOf(false)
+    private var thermalStatus by mutableIntStateOf(PowerManager.THERMAL_STATUS_NONE)
+    private var showBrightnessHelp by mutableStateOf(false)
+
+    private val requestBackgroundPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val cameraGranted = permissions[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        val notificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions[Manifest.permission.POST_NOTIFICATIONS] == true ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        if (cameraGranted && notificationsGranted) {
+            backgroundFlashlightEnabled = true
+            settings.backgroundFlashlightEnabled = true
+            maybeStartBackgroundFlashlight()
+        } else {
+            pendingBackgroundPermission.value = false
+            backgroundFlashlightEnabled = false
+            settings.backgroundFlashlightEnabled = false
+            statusMessage = "Background flashlight needs camera and notification permission"
+        }
+    }
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            updateBatteryState(intent)
+        }
+    }
+
+    private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
+        thermalStatus = status
+        refreshSafetyWarnings()
+    }
 
     private val torchCallback = object : CameraManager.TorchCallback() {
         override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
@@ -108,9 +164,12 @@ class MainActivity : ComponentActivity() {
         settings = FlashlightSettings(this)
         flashlightController = FlashlightController(this)
         cameraManager = flashlightController.cameraManagerInstance
+        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         loadSettings()
         loadFlashlight()
         cameraManager.registerTorchCallback(torchCallback, mainHandler)
+        updateBatteryState(registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)))
+        refreshSafetyWarnings()
         if (startOnLaunch && torchAvailable) {
             updateTorchPower(true)
         }
@@ -128,11 +187,17 @@ class MainActivity : ComponentActivity() {
                         hapticsEnabled = hapticsEnabled,
                         keepScreenAwake = keepScreenAwake,
                         startOnLaunch = startOnLaunch,
+                        backgroundFlashlightEnabled = backgroundFlashlightEnabled,
+                        brightnessHelpVisible = showBrightnessHelp,
+                        warningMessage = warningMessage,
                         onToggle = ::updateTorchPower,
                         onStrengthChange = ::updateStrength,
                         onHapticsChange = ::updateHapticsEnabled,
                         onKeepScreenAwakeChange = ::updateKeepScreenAwake,
                         onStartOnLaunchChange = ::updateStartOnLaunch,
+                        onBackgroundFlashlightChange = ::updateBackgroundFlashlight,
+                        onBrightnessHelpClick = { showBrightnessHelp = true },
+                        onBrightnessHelpDismiss = { showBrightnessHelp = false },
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
@@ -140,6 +205,22 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            powerManager.addThermalStatusListener(thermalListener)
+        }
+    }
+
+    override fun onStop() {
+        runCatching { unregisterReceiver(batteryReceiver) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching { powerManager.removeThermalStatusListener(thermalListener) }
+        }
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -155,6 +236,7 @@ class MainActivity : ComponentActivity() {
         hapticsEnabled = settings.hapticsEnabled
         keepScreenAwake = settings.keepScreenAwake
         startOnLaunch = settings.startOnLaunch
+        backgroundFlashlightEnabled = settings.backgroundFlashlightEnabled
         strengthLevel = settings.strengthLevel
     }
 
@@ -188,7 +270,12 @@ class MainActivity : ComponentActivity() {
             torchEnabled = enabled
             settings.torchEnabled = enabled
             updateScreenAwakeFlag()
+            maybeStartBackgroundFlashlight()
+            if (!enabled) {
+                stopBackgroundFlashlightService()
+            }
             statusMessage = if (enabled) "Flashlight is on" else "Flashlight is off"
+            refreshSafetyWarnings()
         }
     }
 
@@ -202,8 +289,10 @@ class MainActivity : ComponentActivity() {
             runCameraAction {
                 flashlightController.setStrength(cameraId, nextLevel, maxStrengthLevel)
                 statusMessage = "Brightness set to $nextLevel of $maxStrengthLevel"
+                maybeStartBackgroundFlashlight()
             }
         }
+        refreshSafetyWarnings()
     }
 
     private fun supportsStrengthControl(): Boolean {
@@ -226,11 +315,94 @@ class MainActivity : ComponentActivity() {
         settings.startOnLaunch = enabled
     }
 
+    private fun updateBackgroundFlashlight(enabled: Boolean) {
+        if (enabled == backgroundFlashlightEnabled) return
+
+        if (enabled) {
+            val permissions = requiredBackgroundPermissions()
+            val missing = permissions.filter {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (missing.isNotEmpty()) {
+                pendingBackgroundPermission.value = true
+                requestBackgroundPermissions.launch(permissions.toTypedArray())
+                return
+            }
+        }
+
+        backgroundFlashlightEnabled = enabled
+        settings.backgroundFlashlightEnabled = enabled
+        if (!enabled) {
+            stopBackgroundFlashlightService()
+        } else {
+            maybeStartBackgroundFlashlight()
+        }
+    }
+
     private fun updateScreenAwakeFlag() {
         if (keepScreenAwake && torchEnabled) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun maybeStartBackgroundFlashlight() {
+        if (!backgroundFlashlightEnabled || !torchEnabled || !torchAvailable) return
+        val cameraId = torchCameraId ?: return
+        startForegroundFlashlightService(cameraId)
+    }
+
+    private fun stopBackgroundFlashlightService() {
+        runCatching {
+            startService(
+                Intent(this, FlashlightForegroundService::class.java).apply {
+                    action = FlashlightForegroundService.ACTION_STOP
+                }
+            )
+        }
+    }
+
+    private fun startForegroundFlashlightService(cameraId: String) {
+        val intent = Intent(this, FlashlightForegroundService::class.java).apply {
+            putExtra(FlashlightForegroundService.EXTRA_ENABLED, true)
+            putExtra(FlashlightForegroundService.EXTRA_STRENGTH_LEVEL, strengthLevel)
+            putExtra(FlashlightForegroundService.EXTRA_CAMERA_ID, cameraId)
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun requiredBackgroundPermissions(): List<String> {
+        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+        return permissions
+    }
+
+    private fun refreshSafetyWarnings() {
+        warningMessage = when {
+            torchEnabled && !isCharging && batteryLevel <= 15 -> "Battery is low. The flashlight may drain it quickly."
+            torchEnabled && thermalStatus >= PowerManager.THERMAL_STATUS_SEVERE -> "The device is hot. Turn the flashlight off for a moment."
+            else -> null
+        }
+    }
+
+    private fun updateBatteryState(intent: Intent?) {
+        if (intent == null) return
+        batteryLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, batteryLevel)
+        val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+        isCharging = plugged != 0
+        refreshSafetyWarnings()
+    }
+
+    private fun requestBackgroundModePermissionIfNeeded() {
+        val permissions = requiredBackgroundPermissions()
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            requestBackgroundPermissions.launch(permissions.toTypedArray())
         }
     }
 
@@ -256,16 +428,22 @@ private fun FlashlightScreen(
     enabled: Boolean,
     available: Boolean,
     statusMessage: String,
+    warningMessage: String?,
     strengthLevel: Int,
     maxStrengthLevel: Int,
     hapticsEnabled: Boolean,
     keepScreenAwake: Boolean,
     startOnLaunch: Boolean,
+    backgroundFlashlightEnabled: Boolean,
+    brightnessHelpVisible: Boolean,
     onToggle: (Boolean) -> Unit,
     onStrengthChange: (Int) -> Unit,
     onHapticsChange: (Boolean) -> Unit,
     onKeepScreenAwakeChange: (Boolean) -> Unit,
     onStartOnLaunchChange: (Boolean) -> Unit,
+    onBackgroundFlashlightChange: (Boolean) -> Unit,
+    onBrightnessHelpClick: () -> Unit,
+    onBrightnessHelpDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val strengthSupported = maxStrengthLevel > 1
@@ -353,15 +531,34 @@ private fun FlashlightScreen(
                 }
             }
 
+            AnimatedVisibility(visible = warningMessage != null) {
+                warningMessage?.let {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFFB75F00).copy(alpha = 0.30f)
+                    ) {
+                        Text(
+                            text = it,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 AnimatedVisibility(visible = settingsVisible) {
                     SettingsPanel(
                         hapticsEnabled = hapticsEnabled,
                         keepScreenAwake = keepScreenAwake,
                         startOnLaunch = startOnLaunch,
+                        backgroundFlashlightEnabled = backgroundFlashlightEnabled,
                         onHapticsChange = onHapticsChange,
                         onKeepScreenAwakeChange = onKeepScreenAwakeChange,
-                        onStartOnLaunchChange = onStartOnLaunchChange
+                        onStartOnLaunchChange = onStartOnLaunchChange,
+                        onBackgroundFlashlightChange = onBackgroundFlashlightChange
                     )
                 }
 
@@ -383,7 +580,7 @@ private fun FlashlightScreen(
                         color = Color.White.copy(alpha = 0.82f)
                     )
                 } else {
-                    UnsupportedBrightnessNotice()
+                    UnsupportedBrightnessNotice(onBrightnessHelpClick)
                 }
             }
 
@@ -406,6 +603,10 @@ private fun FlashlightScreen(
                     textAlign = TextAlign.Center
                 )
             }
+        }
+
+        if (brightnessHelpVisible) {
+            BrightnessHelpDialog(onDismiss = onBrightnessHelpDismiss)
         }
     }
 }
@@ -607,7 +808,7 @@ private fun FlashlightPowerButton(
 }
 
 @Composable
-private fun UnsupportedBrightnessNotice() {
+private fun UnsupportedBrightnessNotice(onLearnMore: () -> Unit) {
     Surface(
         shape = RoundedCornerShape(8.dp),
         color = Color.Black.copy(alpha = 0.28f)
@@ -631,8 +832,29 @@ private fun UnsupportedBrightnessNotice() {
                 color = Color.White.copy(alpha = 0.68f),
                 textAlign = TextAlign.Center
             )
+            TextButton(onClick = onLearnMore) {
+                Text(text = "Why not here?")
+            }
         }
     }
+}
+
+@Composable
+private fun BrightnessHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "Brightness support") },
+        text = {
+            Text(
+                text = "Android only exposes real flashlight brightness control on Android 13 and newer, and only when the device camera hardware advertises multiple torch strength levels. Older versions can still switch the flashlight on and off, but the system does not offer a public brightness API."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "OK")
+            }
+        }
+    )
 }
 
 @Composable
@@ -640,9 +862,11 @@ private fun SettingsPanel(
     hapticsEnabled: Boolean,
     keepScreenAwake: Boolean,
     startOnLaunch: Boolean,
+    backgroundFlashlightEnabled: Boolean,
     onHapticsChange: (Boolean) -> Unit,
     onKeepScreenAwakeChange: (Boolean) -> Unit,
-    onStartOnLaunchChange: (Boolean) -> Unit
+    onStartOnLaunchChange: (Boolean) -> Unit,
+    onBackgroundFlashlightChange: (Boolean) -> Unit
 ) {
     Surface(
         modifier = Modifier.width(300.dp),
@@ -674,6 +898,12 @@ private fun SettingsPanel(
                 subtitle = "Turn on when app opens",
                 checked = startOnLaunch,
                 onCheckedChange = onStartOnLaunchChange
+            )
+            SettingSwitchRow(
+                title = "Background flashlight",
+                subtitle = "Keep a foreground service active",
+                checked = backgroundFlashlightEnabled,
+                onCheckedChange = onBackgroundFlashlightChange
             )
         }
     }
@@ -721,16 +951,22 @@ private fun FlashlightScreenPreview() {
             enabled = true,
             available = true,
             statusMessage = "Flashlight is on",
+            warningMessage = null,
             strengthLevel = 3,
             maxStrengthLevel = 5,
             hapticsEnabled = true,
             keepScreenAwake = true,
             startOnLaunch = false,
+            backgroundFlashlightEnabled = false,
+            brightnessHelpVisible = false,
             onToggle = {},
             onStrengthChange = {},
             onHapticsChange = {},
             onKeepScreenAwakeChange = {},
-            onStartOnLaunchChange = {}
+            onStartOnLaunchChange = {},
+            onBackgroundFlashlightChange = {},
+            onBrightnessHelpClick = {},
+            onBrightnessHelpDismiss = {}
         )
     }
 }
